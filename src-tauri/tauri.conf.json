@@ -26,6 +26,19 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": ""
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZBMzVCMzgwOENCRTZCODcKUldTSGE3Nk1nTE0xYWpRd1JCWnh1YTZtRXkyQ0kySW9leUVFZldYSXhXMTlvYWVlU3I2M0NUdGgK",
+      "endpoints": [
+        "https://releases.myapp.com/{{target}}/{{current_version}}"
+      ]
+    }
   }
 }
