@@ -34,7 +34,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Install pnpm globally
-        run: npm install -g pnpm@9
+        run: npm install -g pnpm@10
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
