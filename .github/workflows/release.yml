@@ -1,0 +1,167 @@
+name: Release Windows
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0)"
+        required: true
+        type: string
+      name:
+        description: "Release title (defaults to tag)"
+        required: false
+        type: string
+      prerelease:
+        description: "Mark as prerelease"
+        required: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Install pnpm globally
+        run: npm install -g pnpm@9
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Verify pnpm
+        run: pnpm -v
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          cache: "pnpm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Prepare self-signed certificate
+        shell: pwsh
+        timeout-minutes: 3
+        run: |
+          $pfxPath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath "cert.pfx"
+          $cerPath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath "cert.cer"
+          $subject = "CN=Flash Recorder SelfSign"
+          $cert = New-SelfSignedCertificate -Type CodeSigning -Subject $subject -KeyExportPolicy Exportable -KeyLength 2048 -HashAlgorithm sha256 -KeyAlgorithm RSA -NotAfter (Get-Date).AddYears(3) -CertStoreLocation Cert:\CurrentUser\My
+          $pass = [guid]::NewGuid().ToString()
+          $secure = ConvertTo-SecureString -String $pass -Force -AsPlainText
+          Export-PfxCertificate -Cert $cert -FilePath $pfxPath -Password $secure
+          Export-Certificate -Cert $cert -FilePath $cerPath -ErrorAction Stop
+          try {
+            Import-Certificate -FilePath $cerPath -CertStoreLocation Cert:\CurrentUser\TrustedPublisher -ErrorAction Stop
+          } catch {
+          }
+          echo "PFX_FILE=$pfxPath" >> $env:GITHUB_ENV
+          echo "PFX_PASSWORD=$pass" >> $env:GITHUB_ENV
+
+      - name: Ensure ffmpeg resource
+        shell: pwsh
+        run: |
+          if (!(Test-Path "src-tauri\ffmpeg\ffmpeg.exe")) {
+            New-Item -ItemType Directory -Force "src-tauri\ffmpeg" | Out-Null
+            $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+            $zipPath = "ffmpeg.zip"
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath
+            Expand-Archive -Path $zipPath -DestinationPath "ffmpeg_zip" -Force
+            $ff = Get-ChildItem -Path "ffmpeg_zip" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+            if ($null -eq $ff) { throw "ffmpeg.exe not found in downloaded archive" }
+            Copy-Item $ff.FullName "src-tauri\ffmpeg\ffmpeg.exe" -Force
+          }
+
+      - name: Sign ffmpeg resources
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Select-Object -First 1
+          if ($null -eq $tool) { throw "signtool.exe not found" }
+          Get-ChildItem -Recurse -File 'src-tauri\ffmpeg' -Include *.exe | ForEach-Object {
+            & $tool.FullName sign /f "$env:PFX_FILE" /p "$env:PFX_PASSWORD" /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 "$($_.FullName)"
+          }
+
+      - name: Prepare updater signing key
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY_RAW: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          $raw = $env:TAURI_SIGNING_PRIVATE_KEY_RAW
+          $raw = $raw.Trim()
+          if ([string]::IsNullOrWhiteSpace($raw)) { throw "Missing TAURI_SIGNING_PRIVATE_KEY secret" }
+          $keyPath = Join-Path -Path $env:GITHUB_WORKSPACE -ChildPath "tauri-signing.key"
+          Set-Content -Path $keyPath -Value $raw -NoNewline
+          Add-Content -Path $env:GITHUB_ENV -Value ("TAURI_SIGNING_PRIVATE_KEY=" + $keyPath)
+
+      - name: Build Tauri (Windows)
+        run: pnpm run tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ env.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Locate signtool.exe
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" | Where-Object { $_.FullName -match "\\x64\\signtool\.exe$" } | Select-Object -First 1
+          if ($null -eq $tool) { throw "signtool.exe not found" }
+          Add-Content -Path $env:GITHUB_ENV -Value ("SIGNTOOL=" + $tool.FullName)
+
+      - name: Sign MSI and NSIS installers
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/release/bundle"
+          $files = @()
+          $files += Get-ChildItem "$bundle/msi/*.msi" -ErrorAction SilentlyContinue
+          $files += Get-ChildItem "$bundle/nsis/*.exe" -ErrorAction SilentlyContinue
+          if ($files.Count -eq 0) { throw "No installer files found to sign." }
+          if ([string]::IsNullOrWhiteSpace($env:PFX_FILE) -or [string]::IsNullOrWhiteSpace($env:PFX_PASSWORD)) { throw "Missing PFX_FILE or PFX_PASSWORD" }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNTOOL)) { throw "SIGNTOOL not set" }
+          foreach ($f in $files) {
+            & $env:SIGNTOOL sign /f "$env:PFX_FILE" /p "$env:PFX_PASSWORD" /fd sha256 /tr "http://timestamp.digicert.com" /td sha256 "$($f.FullName)"
+            if ($LASTEXITCODE -ne 0) { throw ("Sign failed: " + $f.FullName) }
+          }
+
+      - name: Resolve release metadata
+        id: release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $tag = "${{ inputs.tag }}"
+          }
+          $name = "${{ inputs.name }}"
+          if ([string]::IsNullOrWhiteSpace($name)) { $name = $tag }
+          $prerelease = "${{ inputs.prerelease }}"
+          if ("${{ github.event_name }}" -ne "workflow_dispatch") { $prerelease = "false" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "prerelease=$prerelease" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: ${{ steps.release.outputs.name }}
+          prerelease: ${{ steps.release.outputs.prerelease }}
+          files: |
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/**/*.sig
