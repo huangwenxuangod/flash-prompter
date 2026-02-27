@@ -26,8 +26,10 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "icon": ["icons/icon.ico"],
     "windows": {
+      "allowDowngrades": true,
       "certificateThumbprint": null,
       "digestAlgorithm": "sha256",
       "timestampUrl": ""

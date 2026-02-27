@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import { FiArrowLeft, FiPause, FiPlay, FiRefreshCw, FiSettings, FiSquare } from "react-icons/fi";
 
 const DEFAULT_TEXT = `欢迎使用 Flash Prompter
@@ -50,6 +52,21 @@ export default function App() {
 
   useEffect(() => {
     windowRef.current = getCurrentWebviewWindow();
+  }, []);
+
+  useEffect(() => {
+    const runUpdate = async () => {
+      try {
+        const update = await check();
+        if (update?.available) {
+          await update.downloadAndInstall();
+          await relaunch();
+        }
+      } catch {
+        return;
+      }
+    };
+    runUpdate();
   }, []);
 
   useEffect(() => {
